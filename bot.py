@@ -24,36 +24,44 @@ LINKS_FILE = Path("links.json")
 
 def load_stats():
     if STATS_FILE.exists():
-        with open(STATS_FILE, "r", encoding="utf-8") as f: return json.load(f)
+        with open(STATS_FILE, "r", encoding="utf-8") as f: 
+            return json.load(f)
     return {}
 
 def save_stats(stats):
-    with open(STATS_FILE, "w", encoding="utf-8") as f: json.dump(stats, f, ensure__IDascii=False, indent=2)
+    with open(STATS_FILE, "w", encoding="utf-8") as f: 
+        json.dump(stats, f, ensure_ascii=False, indent=2)
 
 def load_links():
-:    if LINKS_FILE.exists():
-        with open(LINKS_FILE return, "r", encoding="utf-8")
- as f: return json.load(f)
-    return    {}
+    if LINKS_FILE.exists():
+        with open(LINKS_FILE, "r", encoding="utf-8") as f: 
+            return json.load(f)
+    return {}
 
 def save_links(links):
-    with open(LINKS_FILE, "w", encoding="utf- link8") as f: json.dump(links, f, ensure_ascii=False, indent=2)
+    with open(LINKS_FILE, "w", encoding="utf-8") as f: 
+        json.dump(links, f, ensure_ascii=False, indent=2)
 
 # --- СБОР СТАТИСТИКИ ---
 @dp.chat_join_request()
 async def handle_join_request(update: ChatJoinRequest):
-    if update.chat.id != SOURCE_CHANNEL_name = update.invite_link.name if update.invite_link else "Unknown"
+    if update.chat.id != SOURCE_CHANNEL_ID: 
+        return
+    link_name = update.invite_link.name if update.invite_link else "Unknown"
     stats = load_stats()
-    if link_name not in stats: stats[link_name] = {"requests": 0, "joins": 0}
+    if link_name not in stats: 
+        stats[link_name] = {"requests": 0, "joins": 0}
     stats[link_name]["requests"] += 1
     save_stats(stats)
 
 @dp.chat_member(ChatMemberUpdatedFilter(JOIN_TRANSITION))
 async def handle_user_join(update: ChatMemberUpdated):
-    if update.chat.id != SOURCE_CHANNEL_ID: return
+    if update.chat.id != SOURCE_CHANNEL_ID: 
+        return
     link_name = update.invite_link.name if update.invite_link else "Unknown"
     stats = load_stats()
-    if link_name not in stats: stats[link_name] = {"requests": 0, "joins": 0}
+    if link_name not in stats: 
+        stats[link_name] = {"requests": 0, "joins": 0}
     stats[link_name]["joins"] += 1
     save_stats(stats)
 
@@ -76,29 +84,30 @@ async def handle_web_app_data(message: Message):
         stats, links_info = load_stats(), load_links()
         deleted_count = 0
 
-        # 1. Удаление одной ссылки
         if action == "delete":
             name_to_delete = data.get("name")
             if name_to_delete in links_info:
-                try: await bot.revoke_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, invite_link=links_info[name_to_delete])
-                except: pass
+                try: 
+                    await bot.revoke_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, invite_link=links_info[name_to_delete])
+                except: 
+                    pass
                 del links_info[name_to_delete]
             if name_to_delete in stats:
                 del stats[name_to_delete]
                 deleted_count += 1
 
-        # 2. Массовое удаление
         elif action == "mass_delete":
             for name in data.get("names", []):
                 if name in links_info:
-                    try: await bot.revoke_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, invite_link=links_info[name])
-                    except: pass
+                    try: 
+                        await bot.revoke_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, invite_link=links_info[name])
+                    except: 
+                        pass
                     del links_info[name]
                 if name in stats:
                     del stats[name]
                     deleted_count += 1
 
-        # 3. Подготовка к созданию из Mini App
         elif action == "prepare_create":
             text_to_process = data.get("text", "")
             beautiful_message = (
@@ -121,15 +130,18 @@ async def handle_web_app_data(message: Message):
 @dp.message(Command("delete"))
 async def cmd_delete(message: Message):
     args = message.text.replace("/delete", "").strip()
-    if not args: return
+    if not args: 
+        return
     names_to_delete = args.split()
     stats, links_info = load_stats(), load_links()
     deleted_count = 0
 
     for name in names_to_delete:
         if name in links_info:
-            try: await bot.revoke_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, invite_link=links_info[name])
-            except: pass
+            try: 
+                await bot.revoke_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, invite_link=links_info[name])
+            except: 
+                pass
             del links_info[name]
         if name in stats:
             del stats[name]
@@ -154,13 +166,13 @@ async def cmd_start(message: Message):
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text_list(message: Message):
     args = message.text.strip()
-    if not args: return
+    if not args: 
+        return
 
     lines = [line.strip() for line in args.split("\n") if line.strip()]
     tasks = []
     total_links = 0
     
-    # Парсим список
     for line in lines:
         try:
             if "|" in line:
@@ -168,17 +180,19 @@ async def handle_text_list(message: Message):
                 name, count = parts[0].strip(), int(parts[1].strip())
             else:
                 match = re.search(r'(\d+)$', line)
-                if not match: continue
+                if not match: 
+                    continue
                 count, name = int(match.group(1)), line[:match.start()].strip()
             
             if count > 0 and name:
                 tasks.append({"name": name, "target": count, "current": 0})
                 total_links += count
-        except ValueError: pass
+        except ValueError: 
+            pass
 
-    if total_links == 0: return
+    if total_links == 0: 
+        return
 
-    # Функция для генерации красивого текста
     def build_progress_text():
         total_done = sum(t["current"] for t in tasks)
         percent = int((total_done / total_links) * 100)
@@ -188,9 +202,12 @@ async def handle_text_list(message: Message):
         
         tasks_text = ""
         for t in tasks:
-            if t["current"] == t["target"]: icon = "✅"
-            elif t["current"] > 0: icon = "⏳"
-            else: icon = "⏸"
+            if t["current"] == t["target"]: 
+                icon = "✅"
+            elif t["current"] > 0: 
+                icon = "⏳"
+            else: 
+                icon = "⏸"
             
             if t["current"] > 0 and t["current"] < t["target"]:
                 tasks_text += f"{icon} <b>{t['name']}</b>: <code>{t['current']}/{t['target']}</code>\n"
@@ -227,26 +244,28 @@ async def handle_text_list(message: Message):
                     created_count += 1
                     break 
                 except TelegramRetryAfter as e:
-                    # Красиво показываем ожидание
                     wait_text = (
                         f"🚀 <b>Генерация ссылок</b>\n\n"
                         f"⚠️ <i>Защита от спама. Ждем {e.retry_after} сек...</i>\n\n"
                         f"{build_progress_text().split('Статус каналов:')[0]}"
                     )
-                    try: await progress_msg.edit_text(wait_text, parse_mode="HTML")
-                    except: pass
+                    try: 
+                        await progress_msg.edit_text(wait_text, parse_mode="HTML")
+                    except: 
+                        pass
                     await asyncio.sleep(e.retry_after + 2)
                 except Exception as e:
                     current_channel_links.append(f"Ошибка: {link_name}")
                     task["current"] += 1 
                     break
             
-            try: await progress_msg.edit_text(build_progress_text(), parse_mode="HTML")
-            except: pass
+            try: 
+                await progress_msg.edit_text(build_progress_text(), parse_mode="HTML")
+            except: 
+                pass
             
             await asyncio.sleep(2.5)
 
-        # Отправка готового блока в канал
         if current_channel_links:
             links_text = "\n".join(current_channel_links)
             safe_title = re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', channel_name)
@@ -258,18 +277,18 @@ async def handle_text_list(message: Message):
 
     save_links(links_info)
     
-    # Красивое финальное сообщение
     final_text = (
         f"🎉 <b>Все ссылки успешно созданы!</b>\n\n"
         f"📊 <b>Итого:</b> {created_count} ссылок\n"
         f"📁 <b>Каналов обработано:</b> {len(tasks)}\n\n"
         f"<i>Все ссылки отправлены в канал-хранилище. Статистику можно посмотреть в Mini App.</i>"
     )
-    try: await progress_msg.edit_text(final_text, parse_mode="HTML")
-    except: pass
+    try: 
+        await progress_msg.edit_text(final_text, parse_mode="HTML")
+    except: 
+        pass
 
 async def main():
-    # Запускаем мини-сервер для Mini App
     app = web.Application()
     app.router.add_get('/api/stats', handle_get_stats)
     
@@ -278,7 +297,6 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
 
-    # Запускаем бота
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
