@@ -4,16 +4,15 @@ import re
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.filters import Command
-from aiogram.exceptions import TelegramBadRequest
 
 # Токен берем из переменных Railway
 TOKEN = os.getenv("BOT_TOKEN")
 
 # --- НАСТРОЙКИ ID КАНАЛОВ ---
-# Откуда берем ссылки
-SOURCE_CHANNEL_ID = -1003959661585 
+# Откуда берем ссылки (новый ID)
+SOURCE_CHANNEL_ID = -1004306238403 
 
-# Куда кидаем готовый список
+# Куда кидаем готовый список (без изменений)
 STORAGE_CHANNEL_ID = -1003721670958
 
 bot = Bot(token=TOKEN)
@@ -23,18 +22,18 @@ dp = Dispatcher()
 async def cmd_start(message: Message):
     await message.answer(
         "Бот для генерации ссылок готов.\n\n"
-        "Отправь команду /link и список в формате:\n"
+        "Просто отправь мне список в таком формате:\n"
         "<code>Название канала 3</code>\n"
         "<code>Другой канал 2</code>\n\n"
-        "(Число пиши в конце через пробел)",
+        "(Название, потом пробел, потом число. Команда /link больше не нужна)",
         parse_mode="HTML"
     )
 
-@dp.message(Command("link"))
-async def cmd_link(message: Message):
-    args = message.text.replace("/link", "").strip()
+# Ловим любой текст, который не является командой
+@dp.message(F.text & ~F.text.startswith("/"))
+async def handle_text_list(message: Message):
+    args = message.text.strip()
     if not args:
-        await message.answer("Напиши список каналов после команды. Пример:\n/link\nЮлия ПАМП/ДАМП 2\nДжо 3")
         return
 
     lines = [line.strip() for line in args.split("\n") if line.strip()]
@@ -44,13 +43,13 @@ async def cmd_link(message: Message):
     
     for line in lines:
         try:
-            # Поддерживаем оба формата: "Название | 3" и "Название 3"
+            # Поддерживаем формат "Название | 3"
             if "|" in line:
                 parts = line.rsplit("|", 1)
                 name = parts[0].strip()
                 count = int(parts[1].strip())
             else:
-                # Ищем последнее число в строке
+                # Ищем последнее число в строке (формат "Название 3")
                 match = re.search(r'(\d+)$', line)
                 if not match:
                     continue
@@ -63,8 +62,10 @@ async def cmd_link(message: Message):
         except ValueError:
             pass
 
+    # Если не нашли ни одной строки с числом в конце — ничего не делаем
     if total_links == 0:
-        await message.answer("Не нашел валидных строк. Формат: <code>Название 3</code>", parse_mode="HTML")
+        # Можно раскомментировать строчку ниже, если хочешь, чтобы бот ругался на неправильный текст
+        # await message.answer("Не нашел список. Формат: <code>Название 3</code>", parse_mode="HTML")
         return
 
     progress_msg = await message.answer(f"⏳ <b>Начинаю создание ссылок...</b>\n\n[░░░░░░░░░░] 0%", parse_mode="HTML")
@@ -76,7 +77,7 @@ async def cmd_link(message: Message):
     for channel_name, count in tasks:
         results_text += f"📁 <b>{channel_name}</b>\n"
         
-        # Очищаем название от спецсимволов для внутреннего имени ссылки
+        # Очищаем название от спецсимволов для имени ссылки
         clean_link_name = re.sub(r'[^\w\s\-]', '', channel_name).strip()
         
         for i in range(1, count + 1):
@@ -93,12 +94,10 @@ async def cmd_link(message: Message):
                 created_count += 1
                 done_list.append(f"✅ {link_name}")
                 
-            except TelegramBadRequest as e:
-                results_text += f"⚠️ Ошибка: {e}\n"
-                done_list.append(f"❌ {link_name} (Ошибка)")
             except Exception as e:
-                results_text += f"⚠️ Ошибка: {e}\n"
-                done_list.append(f"❌ {link_name} (Ошибка)")
+                error_msg = str(e)
+                results_text += f"⚠️ Ошибка: {error_msg}\n"
+                done_list.append(f"❌ {link_name}: {error_msg[:30]}...")
             
             # --- ОБНОВЛЕНИЕ ПРОГРЕСС-БАРА ---
             percent = int((created_count / total_links) * 100)
@@ -118,6 +117,7 @@ async def cmd_link(message: Message):
             except Exception:
                 pass 
             
+            # Задержка между созданием
             await asyncio.sleep(1.5)
 
     # --- ФИНАЛ ---
