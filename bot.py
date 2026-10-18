@@ -16,8 +16,11 @@ STORAGE_CHANNEL_ID = -1003721670958
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-STATS_FILE = Path("stats.json")
-LINKS_FILE = Path("links.json")
+data_dir = Path("/app/data")
+data_dir.mkdir(parents=True, exist_ok=True)
+
+STATS_FILE = data_dir / "stats.json"
+LINKS_FILE = data_dir / "links.json"
 
 def load_stats():
     if STATS_FILE.exists():
