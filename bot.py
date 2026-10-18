@@ -6,9 +6,10 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, ChatJoinRequest, ChatMemberUpdated
 from aiogram.filters import Command, ChatMemberUpdatedFilter, JOIN_TRANSITION
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from aiohttp import web
 
+# --- НАСТРОЙКИ ---
 TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 8080)) 
 SOURCE_CHANNEL_ID = -1004306238403 
@@ -16,12 +17,15 @@ STORAGE_CHANNEL_ID = -1003721670958
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
+# Постоянное хранилище (Volume на Railway)
 data_dir = Path("/app/data")
 data_dir.mkdir(parents=True, exist_ok=True)
 
 STATS_FILE = data_dir / "stats.json"
 LINKS_FILE = data_dir / "links.json"
 
+# --- ФУНКЦИИ РАБОТЫ С ФАЙЛАМИ ---
 def load_stats():
     if STATS_FILE.exists():
         with open(STATS_FILE, "r", encoding="utf-8") as f: 
@@ -42,6 +46,7 @@ def save_links(links):
     with open(LINKS_FILE, "w", encoding="utf-8") as f: 
         json.dump(links, f, ensure_ascii=False, indent=2)
 
+# --- СБОР СТАТИСТИКИ ---
 @dp.chat_join_request()
 async def handle_join_request(update: ChatJoinRequest):
     if update.chat.id != SOURCE_CHANNEL_ID: 
@@ -64,23 +69,38 @@ async def handle_user_join(update: ChatMemberUpdated):
     stats[link_name]["joins"] += 1
     save_stats(stats)
 
+# --- API ДЛЯ MINI APP (СТАТИСТИКА) ---
 async def handle_get_stats(request):
     stats = load_stats()
     links_info = load_links()
     result = []
+    
     for name, url in links_info.items():
         reqs = stats.get(name, {}).get("requests", 0)
         joins = stats.get(name, {}).get("joins", 0)
         result.append({"name": name, "requests": reqs, "joins": joins, "url": url})
+    
     for name, v in stats.items():
         if name not in links_info:
             result.append({"name": name, "requests": v["requests"], "joins": v["joins"], "url": ""})
+            
     return web.json_response(result, headers={"Access-Control-Allow-Origin": "*"})
 
+# --- API ДЛЯ MINI APP (СОЗДАНИЕ) ---
 async def handle_create_links(request):
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
+    }
+
+    if request.method == 'OPTIONS':
+        return web.Response(status=200, headers=headers)
+        
     try:
         data = await request.json()
         tasks = data.get("tasks", [])
+        
         links_info = load_links()
         created_links = []
         
@@ -88,8 +108,8 @@ async def handle_create_links(request):
             channel_name = task["name"]
             count = task["count"]
             clean_name = re.sub(r'[^\w\s\-]', '', channel_name).strip()
-            channel_links = []
             
+            channel_links = []
             for i in range(1, count + 1):
                 link_name = f"{i}_{clean_name}"
                 retry = True
@@ -102,7 +122,7 @@ async def handle_create_links(request):
                         )
                         links_info[link_name] = link.invite_link
                         channel_links.append(link.invite_link)
-                        await asyncio.sleep(2.5)
+                        await asyncio.sleep(2.5) 
                         retry = False
                     except TelegramRetryAfter as e:
                         await asyncio.sleep(e.retry_after + 2)
@@ -123,10 +143,12 @@ async def handle_create_links(request):
             created_links.append({"name": channel_name, "links": channel_links})
             
         save_links(links_info)
-        return web.json_response({"status": "ok", "data": created_links})
+        
+        return web.json_response({"status": "ok", "data": created_links}, headers=headers)
     except Exception as e:
-        return web.json_response({"status": "error", "message": str(e)}, status=500)
+        return web.json_response({"status": "error", "message": str(e)}, status=500, headers=headers)
 
+# --- ОБРАБОТКА КНОПОК УДАЛЕНИЯ ИЗ MINI APP ---
 @dp.message(F.web_app_data)
 async def handle_web_app_data(message: Message):
     try:
@@ -165,6 +187,7 @@ async def handle_web_app_data(message: Message):
     except Exception as e:
         print("Ошибка WebApp:", e)
 
+# --- КОМАНДА УДАЛЕНИЯ ТЕКСТОМ ---
 @dp.message(Command("delete"))
 async def cmd_delete(message: Message):
     args = message.text.replace("/delete", "").strip()
@@ -189,7 +212,8 @@ async def cmd_delete(message: Message):
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer(
+    # Отправляем сообщение и запоминаем его ID, чтобы удалить при следующем /start
+    sent_msg = await message.answer(
         "Привет! Я бот для создания ссылок.\n\n"
         "Отправь мне список в формате:\n"
         "<code>Название 5</code>\n"
@@ -197,7 +221,10 @@ async def cmd_start(message: Message):
         "Или открой Mini App (кнопка внизу).",
         parse_mode="HTML"
     )
+    # Можно добавить логику хранения ID, но проще всего использовать reply на /start
+    # и удалять предыдущее сообщение через 3 секунды, чтобы не мешало
 
+# --- КРАСИВЫЙ ПРОЦЕСС СОЗДАНИЯ ССЫЛОК (ЧАТ) ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text_list(message: Message):
     args = message.text.strip()
@@ -248,6 +275,10 @@ async def handle_text_list(message: Message):
             f"<b>Статус каналов:</b>\n"
             f"{tasks_text}"
         )
+
+    # Удаляем сообщение пользователя, чтобы не мусорить в чате
+    try: await message.delete()
+    except: pass
 
     progress_msg = await message.answer(build_progress_text(), parse_mode="HTML")
     created_count = 0
@@ -306,13 +337,20 @@ async def handle_text_list(message: Message):
         f"📁 <b>Каналов обработано:</b> {len(tasks)}\n\n"
         f"<i>Все ссылки отправлены в канал-хранилище.</i>"
     )
-    try: await progress_msg.edit_text(final_text, parse_mode="HTML")
+    try: 
+        # Отправляем финальное сообщение и удаляем прогресс-бар
+        await progress_msg.edit_text(final_text, parse_mode="HTML")
+        await asyncio.sleep(3)
+        await progress_msg.delete()
     except: pass
 
+# --- ЗАПУСК ---
 async def main():
     app = web.Application()
+    
     app.router.add_get('/api/stats', handle_get_stats)
     app.router.add_post('/api/create', handle_create_links)
+    app.router.add_options('/api/create', handle_create_links)
     
     runner = web.AppRunner(app)
     await runner.setup()
