@@ -6,10 +6,8 @@ from aiogram.types import Message
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramRetryAfter
 
-# Токен берем из переменных Railway
 TOKEN = os.getenv("BOT_TOKEN")
 
-# --- НАСТРОЙКИ ID КАНАЛОВ ---
 SOURCE_CHANNEL_ID = -1004306238403 
 STORAGE_CHANNEL_ID = -1003721670958
 
@@ -37,7 +35,6 @@ async def handle_text_list(message: Message):
     tasks = []
     total_links = 0
     
-    # Парсим список
     for line in lines:
         try:
             if "|" in line:
@@ -60,7 +57,6 @@ async def handle_text_list(message: Message):
     if total_links == 0:
         return
 
-    # Функция для сборки текста прогресс-бара
     def build_progress_text():
         text = "📋 <b>Список задач:</b>\n\n"
         for t in tasks:
@@ -82,8 +78,7 @@ async def handle_text_list(message: Message):
         count = task["target"]
         clean_link_name = re.sub(r'[^\w\s\-]', '', channel_name).strip()
         
-        # Тут собираем ссылки для ТЕКУЩЕГО канала
-        current_channel_links = [f"📁 <b>{channel_name}</b>"]
+        current_channel_links = []
 
         for i in range(1, count + 1):
             link_name = f"{i}_{clean_link_name}"
@@ -95,14 +90,13 @@ async def handle_text_list(message: Message):
                         name=link_name,
                         creates_join_request=True
                     )
-                    current_channel_links.append(f"<code>{link.invite_link}</code>")
+                    current_channel_links.append(link.invite_link)
                     task["current"] += 1
                     created_count += 1
-                    break # Успех, выходим из цикла ожидания
+                    break 
                     
                 except TelegramRetryAfter as e:
                     wait_time = e.retry_after + 2
-                    # Временно меняем текст, чтобы показать, что ждем
                     temp_text = build_progress_text() + f"\n⏳ <i>Флуд-контроль. Ждем {wait_time} сек...</i>"
                     try:
                         await progress_msg.edit_text(temp_text, parse_mode="HTML")
@@ -111,32 +105,39 @@ async def handle_text_list(message: Message):
                     await asyncio.sleep(wait_time)
                     
                 except Exception as e:
-                    current_channel_links.append(f"⚠️ Ошибка: {link_name}")
-                    task["current"] += 1 # Считаем как обработанную (с ошибкой), чтобы не зависнуть
+                    current_channel_links.append(f"Ошибка: {link_name}")
+                    task["current"] += 1 
                     break
             
-            # Обновляем прогресс после каждой ссылки
             try:
                 await progress_msg.edit_text(build_progress_text(), parse_mode="HTML")
             except:
                 pass
             
-            await asyncio.sleep(3) # Задержка 3 секунды
+            await asyncio.sleep(3)
 
-        # Когда канал сделан - СРАЗУ отправляем его в хранилище
-        if len(current_channel_links) > 1: # Если есть хотя бы одна ссылка (не только заголовок)
+        # --- ОТПРАВКА В КАНАЛ С ЗАГОЛОВКОМ И ИДЕАЛЬНЫМ БЛОКОМ КОДА ---
+        if current_channel_links:
+            # Собираем ссылки в одну строку
+            links_text = "\n".join(current_channel_links)
+            
+            # Используем MarkdownV2. Три апострофа создают идеальный блок кода (pre)
+            # \n\n нужно для отступа
+            # Экранируем название канала на случай спецсимволов (но для простоты берем как есть)
+            safe_title = channel_name.replace("_", "\\_").replace("*", "\\*").replace("[", "\\[").replace("]", "\\]").replace("(", "\\(").replace(")", "\\)").replace("~", "\\~").replace("`", "\\`").replace(">", "\\>").replace("#", "\\#").replace("+", "\\+").replace("-", "\\-").replace("=", "\\=").replace("|", "\\|").replace("{", "\\{").replace("}", "\\}").replace(".", "\\.").replace("!", "\\!")
+            
+            message_text = f"📁 **{safe_title}**\n```\n{links_text}\n```"
+            
             try:
-                # Отправляем одной пачкой
                 await bot.send_message(
                     chat_id=STORAGE_CHANNEL_ID,
-                    text="\n".join(current_channel_links),
-                    parse_mode="HTML"
+                    text=message_text,
+                    parse_mode="MarkdownV2"
                 )
-                await asyncio.sleep(2) # Пауза между отправками разных каналов
+                await asyncio.sleep(2) 
             except Exception as e:
-                await message.answer(f"⚠️ Не удалось отправить {channel_name} в канал: {e}")
+                await message.answer(f"⚠️ Не удалось отправить ссылки в канал: {e}")
 
-    # Финал
     await progress_msg.edit_text(
         build_progress_text() + f"\n\n✅ <b>Всё готово! Создано {created_count} ссылок.</b>",
         parse_mode="HTML"
