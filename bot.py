@@ -18,7 +18,6 @@ STORAGE_CHANNEL_ID = -1003721670958
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Файлы для хранения данных
 STATS_FILE = Path("stats.json")
 LINKS_FILE = Path("links.json")
 
@@ -65,17 +64,79 @@ async def handle_user_join(update: ChatMemberUpdated):
     stats[link_name]["joins"] += 1
     save_stats(stats)
 
-# --- API ДЛЯ MINI APP ---
+# --- API ДЛЯ MINI APP (СТАТИСТИКА) ---
 async def handle_get_stats(request):
     stats = load_stats()
     links_info = load_links()
     result = []
-    for k, v in stats.items():
-        url = links_info.get(k, "")
-        result.append({"name": k, "requests": v["requests"], "joins": v["joins"], "url": url})
+    
+    # Показываем ВСЕ ссылки, даже без заявок
+    for name, url in links_info.items():
+        reqs = stats.get(name, {}).get("requests", 0)
+        joins = stats.get(name, {}).get("joins", 0)
+        result.append({"name": name, "requests": reqs, "joins": joins, "url": url})
+    
+    # Добавляем те, что есть в статистике, но нет в links.json
+    for name, v in stats.items():
+        if name not in links_info:
+            result.append({"name": name, "requests": v["requests"], "joins": v["joins"], "url": ""})
+            
     return web.json_response(result, headers={"Access-Control-Allow-Origin": "*"})
 
-# --- ОБРАБОТКА КНОПОК ИЗ MINI APP ---
+# --- НОВЫЙ API ДЛЯ СОЗДАНИЯ ССЫЛОК ИЗ MINI APP ---
+async def handle_create_links(request):
+    try:
+        data = await request.json()
+        tasks = data.get("tasks", [])
+        
+        links_info = load_links()
+        created_links = []
+        
+        for task in tasks:
+            channel_name = task["name"]
+            count = task["count"]
+            clean_name = re.sub(r'[^\w\s\-]', '', channel_name).strip()
+            
+            channel_links = []
+            for i in range(1, count + 1):
+                link_name = f"{i}_{clean_name}"
+                retry = True
+                while retry:
+                    try:
+                        link = await bot.create_chat_invite_link(
+                            chat_id=SOURCE_CHANNEL_ID, 
+                            name=link_name, 
+                            creates_join_request=True
+                        )
+                        links_info[link_name] = link.invite_link
+                        channel_links.append(link.invite_link)
+                        await asyncio.sleep(2.5) # Задержка от флуда
+                        retry = False
+                    except TelegramRetryAfter as e:
+                        await asyncio.sleep(e.retry_after + 2)
+                    except Exception:
+                        retry = False # Пропускаем, если ошибка не флуд
+            
+            # Отправляем сразу в канал
+            if channel_links:
+                links_text = "\n".join(channel_links)
+                safe_title = re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', channel_name)
+                try:
+                    await bot.send_message(
+                        STORAGE_CHANNEL_ID, 
+                        f"📁 **{safe_title}**\n```\n{links_text}\n```", 
+                        parse_mode="MarkdownV2"
+                    )
+                except: pass
+                
+            created_links.append({"name": channel_name, "links": channel_links})
+            
+        save_links(links_info)
+        return web.json_response({"status": "ok", "data": created_links})
+    except Exception as e:
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+# --- ОБРАБОТКА КНОПОК УДАЛЕНИЯ ИЗ MINI APP ---
 @dp.message(F.web_app_data)
 async def handle_web_app_data(message: Message):
     try:
@@ -107,16 +168,6 @@ async def handle_web_app_data(message: Message):
                 if name in stats:
                     del stats[name]
                     deleted_count += 1
-
-        elif action == "prepare_create":
-            text_to_process = data.get("text", "")
-            beautiful_message = (
-                "✨ <b>Список успешно подготовлен!</b>\n\n"
-                "Вот твой список, который нужно отправить мне в чат:\n\n"
-                f"<code>{text_to_process}</code>\n\n"
-                "👇 <i>Просто скопируй его и отправь сообщением, я сразу начну создавать ссылки.</i>"
-            )
-            await message.answer(beautiful_message, parse_mode="HTML")
 
         save_stats(stats)
         save_links(links_info)
@@ -158,11 +209,11 @@ async def cmd_start(message: Message):
         "Отправь мне список в формате:\n"
         "<code>Название 5</code>\n"
         "<code>Другое название 2</code>\n\n"
-        "Или открой Mini App (кнопка внизу), чтобы посмотреть статистику.",
+        "Или открой Mini App (кнопка внизу), чтобы посмотреть статистику и создать ссылки.",
         parse_mode="HTML"
     )
 
-# --- КРАСИВЫЙ ПРОЦЕСС СОЗДАНИЯ ССЫЛОК ---
+# --- КРАСИВЫЙ ПРОЦЕСС СОЗДАНИЯ ССЫЛОК (ЧЕРЕЗ ЧАТ) ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text_list(message: Message):
     args = message.text.strip()
@@ -184,8 +235,8 @@ async def handle_text_list(message: Message):
                     continue
                 count, name = int(match.group(1)), line[:match.start()].strip()
             
-            if count > 0 and name:
-                tasks.append({"name": name, "target": count, "current": 0})
+']            if}: count > 0 and name:
+                tasks <.append({"name": name, "targetcode": count, "current": >{0})
                 total_links += count
         except ValueError: 
             pass
@@ -212,7 +263,7 @@ async def handle_text_list(message: Message):
             if t["current"] > 0 and t["current"] < t["target"]:
                 tasks_text += f"{icon} <b>{t['name']}</b>: <code>{t['current']}/{t['target']}</code>\n"
             else:
-                tasks_text += f"{icon} {t['name']}: <code>{t['current']}/{t['target']}</code>\n"
+                tasks_text += f"{icon} {t['namet['current']}/{t['target']}</code>\n"
 
         return (
             f"🚀 <b>Генерация ссылок</b>\n\n"
@@ -291,6 +342,7 @@ async def handle_text_list(message: Message):
 async def main():
     app = web.Application()
     app.router.add_get('/api/stats', handle_get_stats)
+    app.router.add_post('/api/create', handle_create_links) # Новый эндпоинт для Mini App
     
     runner = web.AppRunner(app)
     await runner.setup()
