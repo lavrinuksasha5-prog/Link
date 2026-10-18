@@ -6,7 +6,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, ChatJoinRequest, ChatMemberUpdated
 from aiogram.filters import Command, ChatMemberUpdatedFilter, JOIN_TRANSITION
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from aiohttp import web
 
 # --- НАСТРОЙКИ ---
@@ -24,27 +24,32 @@ data_dir.mkdir(parents=True, exist_ok=True)
 
 STATS_FILE = data_dir / "stats.json"
 LINKS_FILE = data_dir / "links.json"
+MESSAGES_FILE = data_dir / "messages.json" # Новый файл для ID сообщений
 
 # --- ФАЙЛЫ ---
 def load_stats():
     if STATS_FILE.exists():
-        with open(STATS_FILE, "r", encoding="utf-8") as f: 
-            return json.load(f)
+        with open(STATS_FILE, "r", encoding="utf-8") as f: return json.load(f)
     return {}
 
 def save_stats(stats):
-    with open(STATS_FILE, "w", encoding="utf-8") as f: 
-        json.dump(stats, f, ensure_ascii=False, indent=2)
+    with open(STATS_FILE, "w", encoding="utf-8") as f: json.dump(stats, f, ensure_ascii=False, indent=2)
 
 def load_links():
     if LINKS_FILE.exists():
-        with open(LINKS_FILE, "r", encoding="utf-8") as f: 
-            return json.load(f)
+        with open(LINKS_FILE, "r", encoding="utf-8") as f: return json.load(f)
     return {}
 
 def save_links(links):
-    with open(LINKS_FILE, "w", encoding="utf-8") as f: 
-        json.dump(links, f, ensure_ascii=False, indent=2)
+    with open(LINKS_FILE, "w", encoding="utf-8") as f: json.dump(links, f, ensure_ascii=False, indent=2)
+
+def load_messages():
+    if MESSAGES_FILE.exists():
+        with open(MESSAGES_FILE, "r", encoding="utf-8") as f: return json.load(f)
+    return {}
+
+def save_messages(messages):
+    with open(MESSAGES_FILE, "w", encoding="utf-8") as f: json.dump(messages, f, ensure_ascii=False, indent=2)
 
 # --- СТАТИСТИКА ---
 @dp.chat_join_request()
@@ -118,19 +123,32 @@ async def handle_delete_links(request):
         data = await request.json()
         names_to_delete = data.get("names", [])
         stats, links_info = load_stats(), load_links()
+        messages = load_messages()
         deleted_count = 0
 
         for name in names_to_delete:
+            # 1. Удаляем ссылку из Telegram
             if name in links_info:
                 try: await bot.revoke_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, invite_link=links_info[name])
                 except: pass
                 del links_info[name]
+
+            # 2. Удаляем статистику
             if name in stats:
                 del stats[name]
                 deleted_count += 1
 
+            # 3. Удаляем сообщение из канала (если знаем ID)
+            if name in messages:
+                try: 
+                    await bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=messages[name])
+                except: pass
+                del messages[name]
+
         save_stats(stats)
         save_links(links_info)
+        save_messages(messages)
+        
         return web.json_response({"status": "ok", "deleted": deleted_count}, headers=headers)
     except Exception as e:
         return web.json_response({"status": "error", "message": str(e)}, status=500, headers=headers)
@@ -138,7 +156,7 @@ async def handle_delete_links(request):
 # --- ОБРАБОТКА КНОПОК ---
 @dp.message(F.web_app_data)
 async def handle_web_app_data(message: Message):
-    pass # Данные теперь идут напрямую через API
+    pass
 
 # --- КОМАНДА УДАЛЕНИЯ ---
 @dp.message(Command("delete"))
@@ -146,7 +164,7 @@ async def cmd_delete(message: Message):
     args = message.text.replace("/delete", "").strip()
     if not args: return
     names_to_delete = args.split()
-    stats, links_info = load_stats(), load_links()
+    stats, links_info, messages = load_stats(), load_links(), load_messages()
     deleted_count = 0
     for name in names_to_delete:
         if name in links_info:
@@ -156,15 +174,20 @@ async def cmd_delete(message: Message):
         if name in stats:
             del stats[name]
             deleted_count += 1
+        if name in messages:
+            try: await bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=messages[name])
+            except: pass
+            del messages[name]
     save_links(links_info)
     save_stats(stats)
-    await message.answer(f"✅ Удалено ссылок: {deleted_count}")
+    save_messages(messages)
+    await message.answer(f"✅ Удалено ссылок и сообщений: {deleted_count}")
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer("Привет! Открой Mini App, чтобы управлять ссылками.", parse_mode="HTML")
 
-# --- КРАСИВЫЙ ПРОЦЕСС СОЗДАНИЯ (ЧАТ) ---
+# --- ПРОЦЕСС СОЗДАНИЯ (ЧАТ) ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text_list(message: Message):
     args = message.text.strip()
@@ -204,7 +227,7 @@ async def handle_text_list(message: Message):
     except: pass
     progress_msg = await message.answer(build_progress_text(), parse_mode="HTML")
     created_count = 0
-    links_info = load_links()
+    links_info, messages = load_links(), load_messages()
 
     for task in tasks:
         channel_name = task["name"]
@@ -232,10 +255,14 @@ async def handle_text_list(message: Message):
         if current_channel_links:
             links_text = "\n".join(current_channel_links)
             safe_title = re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', channel_name)
-            try: await bot.send_message(STORAGE_CHANNEL_ID, f"📁 **{safe_title}**\n```\n{links_text}\n```", parse_mode="MarkdownV2")
+            try: 
+                # Сохраняем ID сообщения, отправленного в канал
+                sent_msg = await bot.send_message(STORAGE_CHANNEL_ID, f"📁 **{safe_title}**\n```\n{links_text}\n```", parse_mode="MarkdownV2")
+                messages[channel_name] = sent_msg.message_id
             except: pass
 
     save_links(links_info)
+    save_messages(messages)
     await progress_msg.edit_text(f"🎉 <b>Готово!</b> Создано {created_count} ссылок.", parse_mode="HTML")
 
 # --- ЗАПУСК ---
