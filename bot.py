@@ -24,7 +24,7 @@ data_dir.mkdir(parents=True, exist_ok=True)
 
 STATS_FILE = data_dir / "stats.json"
 LINKS_FILE = data_dir / "links.json"
-MESSAGES_FILE = data_dir / "messages.json" # Новый файл для ID сообщений
+MESSAGES_FILE = data_dir / "messages.json" # Файл для ID сообщений в канале
 
 # --- ФАЙЛЫ ---
 def load_stats():
@@ -94,7 +94,9 @@ async def handle_create_single(request):
         index = data.get("index")
         clean_name = re.sub(r'[^\w\s\-]', '', channel_name).strip()
         link_name = f"{index}_{clean_name}"
+        
         links_info = load_links()
+        messages = load_messages()
         
         retry = True
         link_url = None
@@ -111,6 +113,20 @@ async def handle_create_single(request):
                 return web.json_response({"status": "error", "message": str(e)}, status=500, headers=headers)
 
         save_links(links_info)
+        
+        # Отправляем ссылку в канал
+        try:
+            safe_title = re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', link_name)
+            sent_msg = await bot.send_message(
+                STORAGE_CHANNEL_ID, 
+                f"📁 **{safe_title}**\n```\n{link_url}\n```", 
+                parse_mode="MarkdownV2"
+            )
+            messages[link_name] = sent_msg.message_id
+            save_messages(messages)
+        except Exception as e:
+            print("Ошибка отправки в канал:", e)
+
         return web.json_response({"status": "ok", "link": link_url}, headers=headers)
     except Exception as e:
         return web.json_response({"status": "error", "message": str(e)}, status=500, headers=headers)
@@ -122,12 +138,11 @@ async def handle_delete_links(request):
     try:
         data = await request.json()
         names_to_delete = data.get("names", [])
-        stats, links_info = load_stats(), load_links()
-        messages = load_messages()
+        stats, links_info, messages = load_stats(), load_links(), load_messages()
         deleted_count = 0
 
         for name in names_to_delete:
-            # 1. Удаляем ссылку из Telegram
+            # 1. Отзываем ссылку
             if name in links_info:
                 try: await bot.revoke_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, invite_link=links_info[name])
                 except: pass
@@ -138,10 +153,9 @@ async def handle_delete_links(request):
                 del stats[name]
                 deleted_count += 1
 
-            # 3. Удаляем сообщение из канала (если знаем ID)
+            # 3. Удаляем сообщение из канала
             if name in messages:
-                try: 
-                    await bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=messages[name])
+                try: await bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=messages[name])
                 except: pass
                 del messages[name]
 
@@ -158,7 +172,7 @@ async def handle_delete_links(request):
 async def handle_web_app_data(message: Message):
     pass
 
-# --- КОМАНДА УДАЛЕНИЯ ---
+# --- КОМАНДА УДАЛЕНИЯ (В ЧАТЕ) ---
 @dp.message(Command("delete"))
 async def cmd_delete(message: Message):
     args = message.text.replace("/delete", "").strip()
@@ -187,7 +201,7 @@ async def cmd_delete(message: Message):
 async def cmd_start(message: Message):
     await message.answer("Привет! Открой Mini App, чтобы управлять ссылками.", parse_mode="HTML")
 
-# --- ПРОЦЕСС СОЗДАНИЯ (ЧАТ) ---
+# --- ПРОЦЕСС СОЗДАНИЯ (В ЧАТЕ) ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text_list(message: Message):
     args = message.text.strip()
@@ -256,7 +270,6 @@ async def handle_text_list(message: Message):
             links_text = "\n".join(current_channel_links)
             safe_title = re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', channel_name)
             try: 
-                # Сохраняем ID сообщения, отправленного в канал
                 sent_msg = await bot.send_message(STORAGE_CHANNEL_ID, f"📁 **{safe_title}**\n```\n{links_text}\n```", parse_mode="MarkdownV2")
                 messages[channel_name] = sent_msg.message_id
             except: pass
