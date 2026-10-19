@@ -28,7 +28,7 @@ LINKS_FILE = data_dir / "links.json"
 MESSAGES_FILE = data_dir / "messages.json"
 REQUESTS_LOG_FILE = data_dir / "requests_log.json"
 
-# --- ФУНКЦИИ РАБОТЫ С ФАЙЛАМИ ---
+# --- ФУНКЦИИ ---
 def load_stats():
     if STATS_FILE.exists():
         with open(STATS_FILE, "r", encoding="utf-8") as f: return json.load(f)
@@ -53,58 +53,56 @@ def load_messages():
 def save_messages(messages):
     with open(MESSAGES_FILE, "w", encoding="utf-8") as f: json.dump(messages, f, ensure_ascii=False, indent=2)
 
-# --- ВОССТАНОВЛЕНИЕ БАЗЫ ИЗ КАНАЛА ---
-@dp.message(Command("restore"))
-async def cmd_restore(message: Message):
-    msg = await message.answer("⏳ Читаю историю канала и восстанавливаю базу...")
+# --- НОВАЯ КОМАНДА ДЛЯ ВОССТАНОВЛЕНИЯ БАЗЫ ---
+@dp.message(Command("recreate"))
+async def cmd_recreate(message: Message):
+    args = message.text.replace("/recreate", "").strip()
+    if not args:
+        await message.answer("Напиши список каналов, которые надо восстановить. Пример:\n/recreate\nДжо 3\nТема 2")
+        return
+
+    lines = [line.strip() for line in args.split("\n") if line.strip()]
+    tasks, total_links = [], 0
     
+    for line in lines:
+        try:
+            if "|" in line:
+                parts = line.rsplit("|", 1)
+                name, count = parts[0].strip(), int(parts[1].strip())
+            else:
+                match = re.search(r'(\d+)$', line)
+                if not match: continue
+                count, name = int(match.group(1)), line[:match.start()].strip()
+            if count > 0 and name:
+                tasks.append({"name": name, "target": count})
+                total_links += count
+        except ValueError: pass
+
+    if total_links == 0: return
+
+    msg = await message.answer("🔄 Восстанавливаю ссылки...")
     links_info = load_links()
-    messages = load_messages()
     restored_count = 0
-    
-    try:
-        # Проходимся по последним 1000 сообщениям в канале (чтобы не зависнуть навсегда)
-        async for msg_obj in bot.get_chat_history(chat_id=STORAGE_CHANNEL_ID, limit=1000):
-            if msg_obj.text and "https://t.me/+" in msg_obj.text:
-                # Парсим текст сообщения. Ищем заголовок и ссылки
-                text = msg_obj.text
-                
-                # Пример текста: 📁 **Название**\n```\nhttps://t.me/+xxx\n```
-                lines = text.split("\n")
-                channel_name = ""
-                
-                # Ищем название канала (строка с 📁)
-                for line in lines:
-                    if "📁" in line:
-                        # Убираем эмодзи, звездочки и пробелы
-                        channel_name = re.sub(r'[📁*]', '', line).strip()
-                        break
-                
-                if not channel_name:
-                    continue
-                    
-                # Ищем ссылки
-                found_links = re.findall(r'https://t\.me/\+\S+', text)
-                if not found_links:
-                    continue
-                    
-                # Восстанавливаем ссылки в базу
-                for idx, link in enumerate(found_links, start=1):
-                    link_name = f"{idx}_{channel_name}"
-                    if link_name not in links_info:
-                        links_info[link_name] = link
-                        restored_count += 1
-                
-                # Запоминаем ID сообщения
-                messages[channel_name] = msg_obj.message_id
-                
-        save_links(links_info)
-        save_messages(messages)
+
+    for task in tasks:
+        channel_name = task["name"]
+        clean_name = re.sub(r'[^\w\s\-]', '', channel_name).strip()
         
-        await msg.edit_text(f"✅ <b>База восстановлена!</b>\n\nНайдено и добавлено ссылок: {restored_count}", parse_mode="HTML")
-        
-    except Exception as e:
-        await msg.edit_text(f"⚠️ Ошибка при восстановлении: {e}")
+        for i in range(1, task["target"] + 1):
+            link_name = f"{i}_{clean_name}"
+            try:
+                # Создаем ссылку заново. Telegram вернет тот же URL, если имя совпадает
+                link = await bot.create_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, name=link_name, creates_join_request=True)
+                links_info[link_name] = link.invite_link
+                restored_count += 1
+                await asyncio.sleep(1.5) # Пауза
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after + 2)
+            except Exception as e:
+                pass
+
+    save_links(links_info)
+    await msg.edit_text(f"✅ <b>Восстановлено ссылок:</b> {restored_count}\n\nТеперь они снова видны в Mini App!", parse_mode="HTML")
 
 # --- СБОР СТАТИСТИКИ ---
 @dp.chat_join_request()
@@ -188,7 +186,6 @@ async def handle_get_dashboard(request):
 
 async def handle_get_daily_report(request):
     report = {"period": "", "total_requests": 0, "details": []}
-    
     if not REQUESTS_LOG_FILE.exists():
         return web.json_response(report, headers={"Access-Control-Allow-Origin": "*"})
         
@@ -196,7 +193,6 @@ async def handle_get_daily_report(request):
         log_data = json.load(f)
         
     now_kyiv = datetime.utcnow() + timedelta(hours=3)
-    
     if now_kyiv.hour >= 15:
         end_time = now_kyiv.replace(hour=15, minute=0, second=0, microsecond=0)
         start_time = end_time - timedelta(days=1)
@@ -206,7 +202,6 @@ async def handle_get_daily_report(request):
         
     start_ts = int(start_time.timestamp())
     end_ts = int(end_time.timestamp())
-    
     report["period"] = f"{start_time.strftime('%d.%m')} 15:00 — {end_time.strftime('%d.%m')} 15:00"
     
     counter = Counter()
@@ -217,7 +212,6 @@ async def handle_get_daily_report(request):
             report["total_requests"] += 1
             
     report["details"] = [{"link": k, "count": v} for k, v in counter.most_common()]
-    
     return web.json_response(report, headers={"Access-Control-Allow-Origin": "*"})
 
 async def handle_create_single(request):
@@ -232,7 +226,6 @@ async def handle_create_single(request):
         
         clean_name = re.sub(r'[^\w\s\-]', '', channel_name).strip()
         link_name = f"{index}_{clean_name}"
-        
         links_info = load_links()
         messages = load_messages()
         
@@ -306,7 +299,6 @@ async def handle_delete_links(request):
     except Exception as e:
         return web.json_response({"status": "error", "message": str(e)}, status=500, headers=headers)
 
-# --- КОМАНДА УДАЛЕНИЯ ---
 @dp.message(Command("delete"))
 async def cmd_delete(message: Message):
     args = message.text.replace("/delete", "").strip()
