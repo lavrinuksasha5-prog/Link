@@ -20,7 +20,6 @@ STORAGE_CHANNEL_ID = -1003721670958
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Постоянное хранилище
 data_dir = Path("/app/data")
 data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -53,6 +52,59 @@ def load_messages():
 
 def save_messages(messages):
     with open(MESSAGES_FILE, "w", encoding="utf-8") as f: json.dump(messages, f, ensure_ascii=False, indent=2)
+
+# --- ВОССТАНОВЛЕНИЕ БАЗЫ ИЗ КАНАЛА ---
+@dp.message(Command("restore"))
+async def cmd_restore(message: Message):
+    msg = await message.answer("⏳ Читаю историю канала и восстанавливаю базу...")
+    
+    links_info = load_links()
+    messages = load_messages()
+    restored_count = 0
+    
+    try:
+        # Проходимся по последним 1000 сообщениям в канале (чтобы не зависнуть навсегда)
+        async for msg_obj in bot.get_chat_history(chat_id=STORAGE_CHANNEL_ID, limit=1000):
+            if msg_obj.text and "https://t.me/+" in msg_obj.text:
+                # Парсим текст сообщения. Ищем заголовок и ссылки
+                text = msg_obj.text
+                
+                # Пример текста: 📁 **Название**\n```\nhttps://t.me/+xxx\n```
+                lines = text.split("\n")
+                channel_name = ""
+                
+                # Ищем название канала (строка с 📁)
+                for line in lines:
+                    if "📁" in line:
+                        # Убираем эмодзи, звездочки и пробелы
+                        channel_name = re.sub(r'[📁*]', '', line).strip()
+                        break
+                
+                if not channel_name:
+                    continue
+                    
+                # Ищем ссылки
+                found_links = re.findall(r'https://t\.me/\+\S+', text)
+                if not found_links:
+                    continue
+                    
+                # Восстанавливаем ссылки в базу
+                for idx, link in enumerate(found_links, start=1):
+                    link_name = f"{idx}_{channel_name}"
+                    if link_name not in links_info:
+                        links_info[link_name] = link
+                        restored_count += 1
+                
+                # Запоминаем ID сообщения
+                messages[channel_name] = msg_obj.message_id
+                
+        save_links(links_info)
+        save_messages(messages)
+        
+        await msg.edit_text(f"✅ <b>База восстановлена!</b>\n\nНайдено и добавлено ссылок: {restored_count}", parse_mode="HTML")
+        
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка при восстановлении: {e}")
 
 # --- СБОР СТАТИСТИКИ ---
 @dp.chat_join_request()
@@ -254,7 +306,7 @@ async def handle_delete_links(request):
     except Exception as e:
         return web.json_response({"status": "error", "message": str(e)}, status=500, headers=headers)
 
-# --- ОБРАБОТКА КОМАНД В ЧАТЕ ---
+# --- КОМАНДА УДАЛЕНИЯ ---
 @dp.message(Command("delete"))
 async def cmd_delete(message: Message):
     args = message.text.replace("/delete", "").strip()
@@ -366,7 +418,7 @@ async def handle_text_list(message: Message):
     save_messages(messages)
     await progress_msg.edit_text(f"🎉 <b>Готово!</b> Создано {created_count} ссылок.", parse_mode="HTML")
 
-# --- ЗАПУСК СЕРВЕРА И БОТА ---
+# --- ЗАПУСК ---
 async def main():
     app = web.Application()
     app.router.add_get('/api/stats', handle_get_stats)
