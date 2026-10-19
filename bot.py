@@ -8,7 +8,10 @@ from aiogram.types import Message, ChatJoinRequest, ChatMemberUpdated
 from aiogram.filters import Command, ChatMemberUpdatedFilter, JOIN_TRANSITION
 from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from aiohttp import web
+from datetime import datetime, timedelta
+from collections import Counter
 
+# --- НАСТРОЙКИ ---
 TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 8080)) 
 SOURCE_CHANNEL_ID = -1004306238403 
@@ -17,65 +20,72 @@ STORAGE_CHANNEL_ID = -1003721670958
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# Постоянное хранилище
 data_dir = Path("/app/data")
 data_dir.mkdir(parents=True, exist_ok=True)
 
 STATS_FILE = data_dir / "stats.json"
 LINKS_FILE = data_dir / "links.json"
 MESSAGES_FILE = data_dir / "messages.json"
+REQUESTS_LOG_FILE = data_dir / "requests_log.json"
 
+# --- ФУНКЦИИ РАБОТЫ С ФАЙЛАМИ ---
 def load_stats():
     if STATS_FILE.exists():
-        with open(STATS_FILE, "r", encoding="utf-8") as f: 
-            return json.load(f)
+        with open(STATS_FILE, "r", encoding="utf-8") as f: return json.load(f)
     return {}
 
 def save_stats(stats):
-    with open(STATS_FILE, "w", encoding="utf-8") as f: 
-        json.dump(stats, f, ensure_ascii=False, indent=2)
+    with open(STATS_FILE, "w", encoding="utf-8") as f: json.dump(stats, f, ensure_ascii=False, indent=2)
 
 def load_links():
     if LINKS_FILE.exists():
-        with open(LINKS_FILE, "r", encoding="utf-8") as f: 
-            return json.load(f)
+        with open(LINKS_FILE, "r", encoding="utf-8") as f: return json.load(f)
     return {}
 
 def save_links(links):
-    with open(LINKS_FILE, "w", encoding="utf-8") as f: 
-        json.dump(links, f, ensure_ascii=False, indent=2)
+    with open(LINKS_FILE, "w", encoding="utf-8") as f: json.dump(links, f, ensure_ascii=False, indent=2)
 
 def load_messages():
     if MESSAGES_FILE.exists():
-        with open(MESSAGES_FILE, "r", encoding="utf-8") as f: 
-            return json.load(f)
+        with open(MESSAGES_FILE, "r", encoding="utf-8") as f: return json.load(f)
     return {}
 
 def save_messages(messages):
-    with open(MESSAGES_FILE, "w", encoding="utf-8") as f: 
-        json.dump(messages, f, ensure_ascii=False, indent=2)
+    with open(MESSAGES_FILE, "w", encoding="utf-8") as f: json.dump(messages, f, ensure_ascii=False, indent=2)
 
+# --- СБОР СТАТИСТИКИ ---
 @dp.chat_join_request()
 async def handle_join_request(update: ChatJoinRequest):
-    if update.chat.id != SOURCE_CHANNEL_ID: 
-        return
+    if update.chat.id != SOURCE_CHANNEL_ID: return
     link_name = update.invite_link.name if update.invite_link else "Unknown"
+    
     stats = load_stats()
-    if link_name not in stats: 
-        stats[link_name] = {"requests": 0, "joins": 0}
+    if link_name not in stats: stats[link_name] = {"requests": 0, "joins": 0}
     stats[link_name]["requests"] += 1
     save_stats(stats)
 
+    log_data = []
+    if REQUESTS_LOG_FILE.exists():
+        with open(REQUESTS_LOG_FILE, "r", encoding="utf-8") as f:
+            log_data = json.load(f)
+            
+    log_data.append({"link": link_name, "timestamp": int(datetime.now().timestamp())})
+    if len(log_data) > 2000: log_data = log_data[-2000:]
+    
+    with open(REQUESTS_LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(log_data, f)
+
 @dp.chat_member(ChatMemberUpdatedFilter(JOIN_TRANSITION))
 async def handle_user_join(update: ChatMemberUpdated):
-    if update.chat.id != SOURCE_CHANNEL_ID: 
-        return
+    if update.chat.id != SOURCE_CHANNEL_ID: return
     link_name = update.invite_link.name if update.invite_link else "Unknown"
     stats = load_stats()
-    if link_name not in stats: 
-        stats[link_name] = {"requests": 0, "joins": 0}
+    if link_name not in stats: stats[link_name] = {"requests": 0, "joins": 0}
     stats[link_name]["joins"] += 1
     save_stats(stats)
 
+# --- API ДЛЯ MINI APP ---
 async def handle_get_stats(request):
     stats = load_stats()
     links_info = load_links()
@@ -89,10 +99,78 @@ async def handle_get_stats(request):
             result.append({"name": name, "requests": v["requests"], "joins": v["joins"], "url": ""})
     return web.json_response(result, headers={"Access-Control-Allow-Origin": "*"})
 
+async def handle_get_dashboard(request):
+    stats = load_stats()
+    total_requests = sum(v["requests"] for v in stats.values())
+    today_requests = 0
+    yesterday_requests = 0
+    
+    if REQUESTS_LOG_FILE.exists():
+        with open(REQUESTS_LOG_FILE, "r", encoding="utf-8") as f:
+            log_data = json.load(f)
+            
+        now_kyiv = datetime.utcnow() + timedelta(hours=3)
+        
+        if now_kyiv.hour >= 15:
+            start_today = now_kyiv.replace(hour=15, minute=0, second=0, microsecond=0)
+        else:
+            start_today = (now_kyiv - timedelta(days=1)).replace(hour=15, minute=0, second=0, microsecond=0)
+            
+        start_yesterday = start_today - timedelta(days=1)
+        
+        start_today_ts = int(start_today.timestamp())
+        start_yesterday_ts = int(start_yesterday.timestamp())
+        
+        for entry in log_data:
+            ts = entry["timestamp"]
+            if ts >= start_today_ts:
+                today_requests += 1
+            elif start_yesterday_ts <= ts < start_today_ts:
+                yesterday_requests += 1
+
+    return web.json_response({
+        "total_requests": total_requests,
+        "today_requests": today_requests,
+        "yesterday_requests": yesterday_requests
+    }, headers={"Access-Control-Allow-Origin": "*"})
+
+async def handle_get_daily_report(request):
+    report = {"period": "", "total_requests": 0, "details": []}
+    
+    if not REQUESTS_LOG_FILE.exists():
+        return web.json_response(report, headers={"Access-Control-Allow-Origin": "*"})
+        
+    with open(REQUESTS_LOG_FILE, "r", encoding="utf-8") as f:
+        log_data = json.load(f)
+        
+    now_kyiv = datetime.utcnow() + timedelta(hours=3)
+    
+    if now_kyiv.hour >= 15:
+        end_time = now_kyiv.replace(hour=15, minute=0, second=0, microsecond=0)
+        start_time = end_time - timedelta(days=1)
+    else:
+        end_time = (now_kyiv - timedelta(days=1)).replace(hour=15, minute=0, second=0, microsecond=0)
+        start_time = end_time - timedelta(days=1)
+        
+    start_ts = int(start_time.timestamp())
+    end_ts = int(end_time.timestamp())
+    
+    report["period"] = f"{start_time.strftime('%d.%m')} 15:00 — {end_time.strftime('%d.%m')} 15:00"
+    
+    counter = Counter()
+    for entry in log_data:
+        ts = entry["timestamp"]
+        if start_ts <= ts < end_ts:
+            counter[entry["link"]] += 1
+            report["total_requests"] += 1
+            
+    report["details"] = [{"link": k, "count": v} for k, v in counter.most_common()]
+    
+    return web.json_response(report, headers={"Access-Control-Allow-Origin": "*"})
+
 async def handle_create_single(request):
     headers = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type"}
-    if request.method == 'OPTIONS': 
-        return web.Response(status=200, headers=headers)
+    if request.method == 'OPTIONS': return web.Response(status=200, headers=headers)
 
     try:
         data = await request.json()
@@ -123,21 +201,12 @@ async def handle_create_single(request):
         save_links(links_info)
         
         if index == count:
-            channel_links = []
-            for i in range(1, count + 1):
-                name = f"{i}_{clean_name}"
-                if name in links_info:
-                    channel_links.append(links_info[name])
-            
+            channel_links = [links_info[f"{i}_{clean_name}"] for i in range(1, count + 1) if f"{i}_{clean_name}" in links_info]
             if channel_links:
                 links_text = "\n".join(channel_links)
                 safe_title = re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', channel_name)
                 try:
-                    sent_msg = await bot.send_message(
-                        STORAGE_CHANNEL_ID, 
-                        f"📁 **{safe_title}**\n```\n{links_text}\n```", 
-                        parse_mode="MarkdownV2"
-                    )
+                    sent_msg = await bot.send_message(STORAGE_CHANNEL_ID, f"📁 **{safe_title}**\n```\n{links_text}\n```", parse_mode="MarkdownV2")
                     messages[channel_name] = sent_msg.message_id
                     save_messages(messages)
                 except Exception as e:
@@ -149,8 +218,7 @@ async def handle_create_single(request):
 
 async def handle_delete_links(request):
     headers = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type"}
-    if request.method == 'OPTIONS': 
-        return web.Response(status=200, headers=headers)
+    if request.method == 'OPTIONS': return web.Response(status=200, headers=headers)
 
     try:
         data = await request.json()
@@ -161,10 +229,8 @@ async def handle_delete_links(request):
 
         for name in names_to_delete:
             if name in links_info:
-                try: 
-                    await bot.revoke_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, invite_link=links_info[name])
-                except: 
-                    pass
+                try: await bot.revoke_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, invite_link=links_info[name])
+                except: pass
                 del links_info[name]
 
             if name in stats:
@@ -172,15 +238,12 @@ async def handle_delete_links(request):
                 deleted_count += 1
 
             parts = name.split("_", 1)
-            if len(parts) == 2:
-                deleted_channels.add(parts[1])
+            if len(parts) == 2: deleted_channels.add(parts[1])
 
         for channel_name in deleted_channels:
             if channel_name in messages:
-                try: 
-                    await bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=messages[channel_name])
-                except: 
-                    pass
+                try: await bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=messages[channel_name])
+                except: pass
                 del messages[channel_name]
 
         save_stats(stats)
@@ -191,15 +254,11 @@ async def handle_delete_links(request):
     except Exception as e:
         return web.json_response({"status": "error", "message": str(e)}, status=500, headers=headers)
 
-@dp.message(F.web_app_data)
-async def handle_web_app_data(message: Message):
-    pass
-
+# --- ОБРАБОТКА КОМАНД В ЧАТЕ ---
 @dp.message(Command("delete"))
 async def cmd_delete(message: Message):
     args = message.text.replace("/delete", "").strip()
-    if not args: 
-        return
+    if not args: return
     names_to_delete = args.split()
     stats, links_info, messages = load_stats(), load_links(), load_messages()
     deleted_count = 0
@@ -207,25 +266,19 @@ async def cmd_delete(message: Message):
     
     for name in names_to_delete:
         if name in links_info:
-            try: 
-                await bot.revoke_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, invite_link=links_info[name])
-            except: 
-                pass
+            try: await bot.revoke_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, invite_link=links_info[name])
+            except: pass
             del links_info[name]
         if name in stats:
             del stats[name]
             deleted_count += 1
-        
         parts = name.split("_", 1)
-        if len(parts) == 2:
-            deleted_channels.add(parts[1])
+        if len(parts) == 2: deleted_channels.add(parts[1])
             
     for channel_name in deleted_channels:
         if channel_name in messages:
-            try: 
-                await bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=messages[channel_name])
-            except: 
-                pass
+            try: await bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=messages[channel_name])
+            except: pass
             del messages[channel_name]
 
     save_links(links_info)
@@ -240,8 +293,7 @@ async def cmd_start(message: Message):
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text_list(message: Message):
     args = message.text.strip()
-    if not args: 
-        return
+    if not args: return
     lines = [line.strip() for line in args.split("\n") if line.strip()]
     tasks, total_links = [], 0
     
@@ -252,17 +304,14 @@ async def handle_text_list(message: Message):
                 name, count = parts[0].strip(), int(parts[1].strip())
             else:
                 match = re.search(r'(\d+)$', line)
-                if not match: 
-                    continue
+                if not match: continue
                 count, name = int(match.group(1)), line[:match.start()].strip()
             if count > 0 and name:
                 tasks.append({"name": name, "target": count, "current": 0})
                 total_links += count
-        except ValueError: 
-            pass
+        except ValueError: pass
 
-    if total_links == 0: 
-        return
+    if total_links == 0: return
 
     def build_progress_text():
         total_done = sum(t["current"] for t in tasks)
@@ -276,10 +325,8 @@ async def handle_text_list(message: Message):
             tasks_text += f"{icon} {name_fmt}: <code>{t['current']}/{t['target']}</code>\n"
         return f"🚀 <b>Генерация ссылок</b>\n\n<code>[{bar}]</code> <b>{percent}%</b>\nГотово: <b>{total_done} из {total_links}</b>\n\n<b>Статус:</b>\n{tasks_text}"
 
-    try: 
-        await message.delete()
-    except: 
-        pass
+    try: await message.delete()
+    except: pass
     progress_msg = await message.answer(build_progress_text(), parse_mode="HTML")
     created_count = 0
     links_info, messages = load_links(), load_messages()
@@ -299,17 +346,12 @@ async def handle_text_list(message: Message):
                     created_count += 1
                     break 
                 except TelegramRetryAfter as e:
-                    try: 
-                        await progress_msg.edit_text(build_progress_text() + f"\n⏳ Ждем {e.retry_after} сек...", parse_mode="HTML")
-                    except: 
-                        pass
+                    try: await progress_msg.edit_text(build_progress_text() + f"\n⏳ Ждем {e.retry_after} сек...", parse_mode="HTML")
+                    except: pass
                     await asyncio.sleep(e.retry_after + 2)
-                except Exception: 
-                    break
-            try: 
-                await progress_msg.edit_text(build_progress_text(), parse_mode="HTML")
-            except: 
-                pass
+                except Exception: break
+            try: await progress_msg.edit_text(build_progress_text(), parse_mode="HTML")
+            except: pass
             await asyncio.sleep(2.0)
 
         if current_channel_links:
@@ -318,16 +360,18 @@ async def handle_text_list(message: Message):
             try: 
                 sent_msg = await bot.send_message(STORAGE_CHANNEL_ID, f"📁 **{safe_title}**\n```\n{links_text}\n```", parse_mode="MarkdownV2")
                 messages[channel_name] = sent_msg.message_id
-            except: 
-                pass
+            except: pass
 
     save_links(links_info)
     save_messages(messages)
     await progress_msg.edit_text(f"🎉 <b>Готово!</b> Создано {created_count} ссылок.", parse_mode="HTML")
 
+# --- ЗАПУСК СЕРВЕРА И БОТА ---
 async def main():
     app = web.Application()
     app.router.add_get('/api/stats', handle_get_stats)
+    app.router.add_get('/api/dashboard', handle_get_dashboard)
+    app.router.add_get('/api/daily_report', handle_get_daily_report)
     app.router.add_post('/api/create_single', handle_create_single)
     app.router.add_options('/api/create_single', handle_create_single)
     app.router.add_post('/api/delete', handle_delete_links)
