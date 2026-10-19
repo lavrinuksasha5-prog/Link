@@ -78,7 +78,6 @@ async def handle_unique_photo(message: Message):
 
     msg = await message.reply(f"⚙️ Уникализирую {count} копий...")
     
-    # Скачиваем фото
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
     file_bytes = await bot.download_file(file.file_path)
@@ -96,7 +95,6 @@ async def handle_unique_photo(message: Message):
         
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             for i in range(1, count + 1):
-                # 1. Визуальная уникализация
                 clean_img = Image.new(original_img.mode, original_img.size)
                 clean_img.putdata(list(original_img.getdata()))
                 
@@ -112,7 +110,6 @@ async def handle_unique_photo(message: Message):
                 clean_img.save(img_byte_arr, format='JPEG', quality=random.randint(92, 98), exif=piexif.dump({}))
                 img_byte_arr.seek(0)
                 
-                # 2. Уникализация имени
                 new_name = base_name
                 for _ in range(random.randint(1, 2)):
                     char_to_replace = random.choice(list(similar_chars.keys()))
@@ -132,6 +129,35 @@ async def handle_unique_photo(message: Message):
     finally:
         if temp_path.exists(): os.remove(temp_path)
         await msg.delete()
+
+# --- УНИКАЛИЗАТОР НАЗВАНИЙ (ТЕКСТА) ---
+@dp.message(Command("names"))
+async def cmd_unique_names(message: Message):
+    args = message.text.replace("/names", "").strip()
+    if not args:
+        await message.reply("Напиши список названий (каждое с новой строки). Пример:\n/names\nДжо\nКрипта")
+        return
+
+    lines = [line.strip() for line in args.split("\n") if line.strip()]
+    if not lines: return
+
+    similar_chars = {'А': 'A', 'В': 'B', 'С': 'C', 'Е': 'E', 'Н': 'H', 'К': 'K', 'М': 'M', 'О': 'O', 'Р': 'P', 'Т': 'T', 'Х': 'X', 'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'у': 'y', 'х': 'x'}
+    invisible_chars = ["\u200b", "\u200c", "\u200d", "\ufeff"]
+
+    result_text = ""
+    for name in lines:
+        new_name = name
+        for _ in range(random.randint(1, 2)):
+            char_to_replace = random.choice(list(similar_chars.keys()))
+            if char_to_replace in new_name:
+                new_name = new_name.replace(char_to_replace, similar_chars[char_to_replace], 1)
+        new_name += random.choice(invisible_chars)
+        result_text += f"{new_name}\n"
+
+    file_bytes = io.BytesIO(result_text.encode('utf-8'))
+    file_bytes.seek(0)
+    document = BufferedInputFile(file_bytes.read(), filename="unique_names.txt")
+    await message.reply_document(document, caption="✅ Готово! Уникализированные названия внутри.")
 
 # --- ВОССТАНОВЛЕНИЕ СТАРЫХ ССЫЛОК ---
 @dp.message(Command("recreate"))
@@ -217,18 +243,47 @@ async def handle_get_dashboard(request):
     return web.json_response({"total_requests": total, "today_requests": today, "yesterday_requests": yesterday}, headers={"Access-Control-Allow-Origin": "*"})
 
 async def handle_get_daily_report(request):
-    report = {"period": "", "total_requests": 0, "details": []}
-    if not REQUESTS_LOG_FILE.exists(): return web.json_response(report, headers={"Access-Control-Allow-Origin": "*"})
-    with open(REQUESTS_LOG_FILE, "r", encoding="utf-8") as f: log_data = json.load(f)
-    now = datetime.utcnow() + timedelta(hours=3)
-    end_time = now.replace(hour=15, minute=0, second=0, microsecond=0) if now.hour >= 15 else (now - timedelta(days=1)).replace(hour=15, minute=0, second=0, microsecond=0)
-    start_time = end_time - timedelta(days=1)
-    report["period"] = f"{start_time.strftime('%d.%m')} 15:00 — {end_time.strftime('%d.%m')} 15:00"
-    st, en = int(start_time.timestamp()), int(end_time.timestamp())
-    counter = Counter()
-    for e in log_data:
-        if st <= e["timestamp"] < en: counter[e["link"]] += 1; report["total_requests"] += 1
-    report["details"] = [{"link": k, "count": v} for k, v in counter.most_common()]
+    report = {"history": []}
+    log_data = []
+    if REQUESTS_LOG_FILE.exists(): 
+        with open(REQUESTS_LOG_FILE, "r", encoding="utf-8") as f: 
+            log_data = json.load(f)
+        
+    cycles = {}
+    for entry in log_data:
+        dt = datetime.utcfromtimestamp(entry["timestamp"]) + timedelta(hours=3)
+        if dt.hour < 15:
+            dt = dt - timedelta(days=1)
+        cycle_key = dt.strftime("%Y-%m-%d")
+        if cycle_key not in cycles: cycles[cycle_key] = Counter()
+        cycles[cycle_key][entry["link"]] += 1
+        
+    now_kyiv = datetime.utcnow() + timedelta(hours=3)
+    if now_kyiv.hour < 15:
+        current_cycle_date = (now_kyiv - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        current_cycle_date = now_kyiv.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if cycles:
+        earliest_date_str = min(cycles.keys())
+        earliest_date = datetime.strptime(earliest_date_str, "%Y-%m-%d")
+    else:
+        earliest_date = current_cycle_date
+
+    temp_date = current_cycle_date
+    while temp_date >= earliest_date:
+        cycle_key = temp_date.strftime("%Y-%m-%d")
+        start_date = temp_date
+        end_date = start_date + timedelta(days=1)
+        period_str = f"{start_date.strftime('%d.%m')} 15:00 — {end_date.strftime('%d.%m')} 15:00"
+        
+        cycle_counter = cycles.get(cycle_key, Counter())
+        total_in_cycle = sum(cycle_counter.values())
+        details = [{"link": k, "count": v} for k, v in cycle_counter.most_common()]
+        
+        report["history"].append({"period": period_str, "total": total_in_cycle, "details": details})
+        temp_date -= timedelta(days=1)
+        
     return web.json_response(report, headers={"Access-Control-Allow-Origin": "*"})
 
 async def handle_create_single(request):
