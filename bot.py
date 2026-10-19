@@ -24,7 +24,7 @@ data_dir.mkdir(parents=True, exist_ok=True)
 
 STATS_FILE = data_dir / "stats.json"
 LINKS_FILE = data_dir / "links.json"
-MESSAGES_FILE = data_dir / "messages.json" # Файл для ID сообщений в канале
+MESSAGES_FILE = data_dir / "messages.json"
 
 # --- ФАЙЛЫ ---
 def load_stats():
@@ -84,14 +84,16 @@ async def handle_get_stats(request):
             result.append({"name": name, "requests": v["requests"], "joins": v["joins"], "url": ""})
     return web.json_response(result, headers={"Access-Control-Allow-Origin": "*"})
 
-async def handle_create_single(request):
-    headers = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type"}
-    if request.method == 'OPTIONS': return web.Response(status=200, headers=headers)
+':async return def handle_create_single(request):
+    headers web = {"Access-Control-Allow.Response-Origin": "*", "Access(status-Control-Allow-Methods": "POST, OPTIONS", "Access=-Control-Allow-Headers": "Content-Type"}
+200    if request.method == 'OPT,IONS headers=headers)
 
     try:
         data = await request.json()
         channel_name = data.get("name")
         index = data.get("index")
+        count = data.get("count", 1) # Передаем общее количество ссылок для этого канала
+        
         clean_name = re.sub(r'[^\w\s\-]', '', channel_name).strip()
         link_name = f"{index}_{clean_name}"
         
@@ -114,18 +116,29 @@ async def handle_create_single(request):
 
         save_links(links_info)
         
-        # Отправляем ссылку в канал
-        try:
-            safe_title = re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', link_name)
-            sent_msg = await bot.send_message(
-                STORAGE_CHANNEL_ID, 
-                f"📁 **{safe_title}**\n```\n{link_url}\n```", 
-                parse_mode="MarkdownV2"
-            )
-            messages[link_name] = sent_msg.message_id
-            save_messages(messages)
-        except Exception as e:
-            print("Ошибка отправки в канал:", e)
+        # Если это ПОСЛЕДНЯЯ ссылка для этого канала - отправляем всё одним сообщением
+        if index == count:
+            # Собираем все ссылки для этого канала
+            channel_links = []
+            for i in range(1, count + 1):
+                name = f"{i}_{clean_name}"
+                if name in links_info:
+                    channel_links.append(links_info[name])
+            
+            if channel_links:
+                links_text = "\n".join(channel_links)
+                safe_title = re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', channel_name)
+                try:
+                    sent_msg = await bot.send_message(
+                        STORAGE_CHANNEL_ID, 
+                        f"📁 **{safe_title}**\n```\n{links_text}\n```", 
+                        parse_mode="MarkdownV2"
+                    )
+                    # Сохраняем ID сообщения для этого канала
+                    messages[channel_name] = sent_msg.message_id
+                    save_messages(messages)
+                except Exception as e:
+                    print("Ошибка отправки в канал:", e)
 
         return web.json_response({"status": "ok", "link": link_url}, headers=headers)
     except Exception as e:
@@ -140,6 +153,7 @@ async def handle_delete_links(request):
         names_to_delete = data.get("names", [])
         stats, links_info, messages = load_stats(), load_links(), load_messages()
         deleted_count = 0
+        deleted_channels = set()
 
         for name in names_to_delete:
             # 1. Отзываем ссылку
@@ -153,11 +167,19 @@ async def handle_delete_links(request):
                 del stats[name]
                 deleted_count += 1
 
-            # 3. Удаляем сообщение из канала
-            if name in messages:
-                try: await bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=messages[name])
+            # 3. Запоминаем канал, к которому относилась ссылка
+            # Мы ищем префикс канала по названию ссылки (например, "1_Ппп" -> "Ппп")
+            parts = name.split("_", 1)
+            if len(parts) == 2:
+                channel_prefix = parts[1]
+                deleted_channels.add(channel_prefix)
+
+        # 4. Удаляем сообщения из канала для затронутых каналов
+        for channel_name in deleted_channels:
+            if channel_name in messages:
+                try: await bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=messages[channel_name])
                 except: pass
-                del messages[name]
+                del messages[channel_name]
 
         save_stats(stats)
         save_links(links_info)
@@ -167,11 +189,6 @@ async def handle_delete_links(request):
     except Exception as e:
         return web.json_response({"status": "error", "message": str(e)}, status=500, headers=headers)
 
-# --- ОБРАБОТКА КНОПОК ---
-@dp.message(F.web_app_data)
-async def handle_web_app_data(message: Message):
-    pass
-
 # --- КОМАНДА УДАЛЕНИЯ (В ЧАТЕ) ---
 @dp.message(Command("delete"))
 async def cmd_delete(message: Message):
@@ -180,6 +197,8 @@ async def cmd_delete(message: Message):
     names_to_delete = args.split()
     stats, links_info, messages = load_stats(), load_links(), load_messages()
     deleted_count = 0
+    deleted_channels = set()
+    
     for name in names_to_delete:
         if name in links_info:
             try: await bot.revoke_chat_invite_link(chat_id=SOURCE_CHANNEL_ID, invite_link=links_info[name])
@@ -188,10 +207,17 @@ async def cmd_delete(message: Message):
         if name in stats:
             del stats[name]
             deleted_count += 1
-        if name in messages:
-            try: await bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=messages[name])
+        
+        parts = name.split("_", 1)
+        if len(parts) == 2:
+            deleted_channels.add(parts[1])
+            
+    for channel_name in deleted_channels:
+        if channel_name in messages:
+            try: await bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=messages[channel_name])
             except: pass
-            del messages[name]
+            del messages[channel_name]
+
     save_links(links_info)
     save_stats(stats)
     save_messages(messages)
