@@ -28,10 +28,18 @@ LINKS_FILE = data_dir / "links.json"
 MESSAGES_FILE = data_dir / "messages.json"
 REQUESTS_LOG_FILE = data_dir / "requests_log.json"
 
-# --- ФАЙЛЫ ---
+# --- УМНАЯ ЗАГРУЗКА ДАННЫХ (АВТО-КОНВЕРТАЦИЯ СТАРЫХ ЦИФР В СПИСКИ) ---
 def load_stats():
     if STATS_FILE.exists():
-        with open(STATS_FILE, "r", encoding="utf-8") as f: return json.load(f)
+        with open(STATS_FILE, "r", encoding="utf-8") as f: 
+            stats = json.load(f)
+            # Конвертируем старые данные (числа) в новые (списки)
+            for link, data in stats.items():
+                if isinstance(data.get("requests"), int):
+                    data["requests"] = [f"old_{i}" for i in range(data["requests"])]
+                if isinstance(data.get("joins"), int):
+                    data["joins"] = [f"old_{i}" for i in range(data["joins"])]
+            return stats
     return {}
 
 def save_stats(stats):
@@ -53,7 +61,7 @@ def load_messages():
 def save_messages(messages):
     with open(MESSAGES_FILE, "w", encoding="utf-8") as f: json.dump(messages, f, ensure_ascii=False, indent=2)
 
-# --- УМНЫЙ СБОР СТАТИСТИКИ ---
+# --- СБОР СТАТИСТИКИ ---
 @dp.chat_join_request()
 async def handle_join_request(update: ChatJoinRequest):
     if update.chat.id != SOURCE_CHANNEL_ID: return
@@ -63,14 +71,8 @@ async def handle_join_request(update: ChatJoinRequest):
     stats = load_stats()
     if link_name not in stats: 
         stats[link_name] = {"requests": [], "joins": []}
-    
-    # Конвертация старых данных (чисел) в список с "базой"
-    if isinstance(stats[link_name].get("requests"), int):
-        stats[link_name]["requests"] = [f"old_{i}" for i in range(stats[link_name]["requests"])]
-    if isinstance(stats[link_name].get("joins"), int):
-        stats[link_name]["joins"] = [f"old_{i}" for i in range(stats[link_name]["joins"])]
 
-    # Считаем только уникальных
+    # Считаем только если ID пользователя еще нет в списке
     if user_id not in stats[link_name]["requests"]:
         stats[link_name]["requests"].append(user_id)
         save_stats(stats)
@@ -96,10 +98,6 @@ async def handle_user_join(update: ChatMemberUpdated):
     
     stats = load_stats()
     if link_name not in stats: stats[link_name] = {"requests": [], "joins": []}
-    if isinstance(stats[link_name].get("requests"), int):
-        stats[link_name]["requests"] = [f"old_{i}" for i in range(stats[link_name]["requests"])]
-    if isinstance(stats[link_name].get("joins"), int):
-        stats[link_name]["joins"] = [f"old_{i}" for i in range(stats[link_name]["joins"])]
     
     if user_id not in stats[link_name]["joins"]:
         stats[link_name]["joins"].append(user_id)
@@ -130,7 +128,6 @@ async def cmd_report(message: Message):
         
     report_text += f"\n📈 <b>Всего за все время (уникальных):</b> {len(total_unique)} заявок"
     
-    # Добавляем старую базу
     stats = load_stats()
     old_base = 0
     for link, data in stats.items():
@@ -157,7 +154,9 @@ async def handle_get_stats(request):
 
 async def handle_get_dashboard(request):
     stats = load_stats()
+    # Теперь здесь не будет ошибки, так как load_stats уже вернул списки
     total = sum(len(v.get("requests", [])) for v in stats.values())
+    
     today, yesterday = 0, 0
     if REQUESTS_LOG_FILE.exists():
         with open(REQUESTS_LOG_FILE, "r", encoding="utf-8") as f: log_data = json.load(f)
@@ -219,59 +218,6 @@ async def handle_get_daily_report(request):
         temp_date -= timedelta(days=1)
         
     return web.json_response(report, headers={"Access-Control-Allow-Origin": "*"})
-
-# --- УНИКАЛИЗАТОР ФОТО ---
-@dp.message(F.photo)
-async def handle_unique_photo(message: Message):
-    caption = message.caption or ""
-    match = re.search(r'^(.+?)\s+(\d+)$', caption.strip())
-    if not match: return await message.reply("⚠️ Подпиши фото в формате:\n<code>Название 50</code>", parse_mode="HTML")
-    base_name = match.group(1).strip()
-    count = int(match.group(2))
-    if count < 1 or count > 100: return await message.reply("❌ От 1 до 100 копий.")
-
-    msg = await message.reply(f"⚙️ Уникализирую {count} копий...")
-    photo = message.photo[-1]
-    file = await bot.get_file(photo.file_id)
-    file_bytes = await bot.download_file(file.file_path)
-    temp_path = data_dir / f"temp_{message.from_user.id}.jpg"
-    with open(temp_path, "wb") as f: f.write(file_bytes.read())
-
-    from PIL import Image, ImageEnhance
-    import piexif, random, io, zipfile
-
-    invisible_chars = ["\u200b", "\u200c", "\u200d", "\ufeff"] 
-    similar_chars = {'А': 'A', 'В': 'B', 'С': 'C', 'Е': 'E', 'Н': 'H', 'К': 'K', 'М': 'M', 'О': 'O', 'Р': 'P', 'Т': 'T', 'Х': 'X', 'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'у': 'y', 'х': 'x'}
-    
-    try:
-        original_img = Image.open(temp_path)
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for i in range(1, count + 1):
-                clean_img = Image.new(original_img.mode, original_img.size)
-                clean_img.putdata(list(original_img.getdata()))
-                clean_img = clean_img.resize((clean_img.width + random.choice([-1, 1]), clean_img.height + random.choice([-1, 1])), Image.Resampling.LANCZOS)
-                enhancer = ImageEnhance.Brightness(clean_img)
-                clean_img = enhancer.enhance(1.0 + random.uniform(-0.015, 0.015))
-                for _ in range(10):
-                    clean_img.putpixel((random.randint(0, clean_img.width - 1), random.randint(0, clean_img.height - 1)), (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)))
-                img_byte_arr = io.BytesIO()
-                clean_img.save(img_byte_arr, format='JPEG', quality=random.randint(92, 98), exif=piexif.dump({}))
-                img_byte_arr.seek(0)
-                
-                new_name = base_name
-                for _ in range(random.randint(1, 2)):
-                    char_to_replace = random.choice(list(similar_chars.keys()))
-                    if char_to_replace in new_name: new_name = new_name.replace(char_to_replace, similar_chars[char_to_replace], 1)
-                new_name += random.choice(invisible_chars)
-                zip_file.writestr(f"{new_name}_{i}.jpg", img_byte_arr.read())
-        zip_buffer.seek(0)
-        document = BufferedInputFile(zip_buffer.read(), filename=f"{base_name}.zip")
-        await message.reply_document(document, caption=f"✅ Готово! {count} уникальных копий.")
-    except Exception as e: await message.reply(f"⚠️ Ошибка: {e}")
-    finally:
-        if temp_path.exists(): os.remove(temp_path)
-        await msg.delete()
 
 # --- СОЗДАНИЕ ССЫЛОК ---
 async def handle_create_single(request):
