@@ -28,12 +28,11 @@ LINKS_FILE = data_dir / "links.json"
 MESSAGES_FILE = data_dir / "messages.json"
 REQUESTS_LOG_FILE = data_dir / "requests_log.json"
 
-# --- УМНАЯ ЗАГРУЗКА ДАННЫХ (АВТО-КОНВЕРТАЦИЯ СТАРЫХ ЦИФР В СПИСКИ) ---
+# --- УМНАЯ ЗАГРУЗКА ДАННЫХ ---
 def load_stats():
     if STATS_FILE.exists():
         with open(STATS_FILE, "r", encoding="utf-8") as f: 
             stats = json.load(f)
-            # Конвертируем старые данные (числа) в новые (списки)
             for link, data in stats.items():
                 if isinstance(data.get("requests"), int):
                     data["requests"] = [f"old_{i}" for i in range(data["requests"])]
@@ -72,7 +71,6 @@ async def handle_join_request(update: ChatJoinRequest):
     if link_name not in stats: 
         stats[link_name] = {"requests": [], "joins": []}
 
-    # Считаем только если ID пользователя еще нет в списке
     if user_id not in stats[link_name]["requests"]:
         stats[link_name]["requests"].append(user_id)
         save_stats(stats)
@@ -115,12 +113,15 @@ async def cmd_report(message: Message):
     total_unique = set()
     
     for entry in log_data:
-        total_unique.add((entry["user_id"], entry["link"]))
+        # Защита: если нет user_id (старые логи), используем timestamp
+        uid = entry.get("user_id", str(entry["timestamp"]))
+        total_unique.add((uid, entry["link"]))
+        
         dt = datetime.utcfromtimestamp(entry["timestamp"]) + timedelta(hours=3)
         date_str = dt.strftime("%d.%m.%Y")
         
         if date_str not in daily_unique: daily_unique[date_str] = set()
-        daily_unique[date_str].add((entry["user_id"], entry["link"]))
+        daily_unique[date_str].add((uid, entry["link"]))
 
     report_text = "📊 <b>Отчет по заявкам:</b>\n\n"
     for date_str, users in sorted(daily_unique.items(), reverse=True)[:7]:
@@ -154,7 +155,6 @@ async def handle_get_stats(request):
 
 async def handle_get_dashboard(request):
     stats = load_stats()
-    # Теперь здесь не будет ошибки, так как load_stats уже вернул списки
     total = sum(len(v.get("requests", [])) for v in stats.values())
     
     today, yesterday = 0, 0
@@ -168,8 +168,9 @@ async def handle_get_dashboard(request):
         today_users = set()
         yest_users = set()
         for e in log_data:
-            if e["timestamp"] >= st: today_users.add((e["user_id"], e["link"]))
-            elif sy <= e["timestamp"] < st: yest_users.add((e["user_id"], e["link"]))
+            uid = e.get("user_id", str(e["timestamp"]))
+            if e["timestamp"] >= st: today_users.add((uid, e["link"]))
+            elif sy <= e["timestamp"] < st: yest_users.add((uid, e["link"]))
         today = len(today_users)
         yesterday = len(yest_users)
             
@@ -182,11 +183,14 @@ async def handle_get_daily_report(request):
     
     cycles = {}
     for entry in log_data:
+        # Защита: если нет user_id (старые логи), используем timestamp
+        uid = entry.get("user_id", str(entry["timestamp"]))
+        
         dt = datetime.utcfromtimestamp(entry["timestamp"]) + timedelta(hours=3)
         if dt.hour < 15: dt = dt - timedelta(days=1)
         cycle_key = dt.strftime("%Y-%m-%d")
         if cycle_key not in cycles: cycles[cycle_key] = set()
-        cycles[cycle_key].add((entry["user_id"], entry["link"]))
+        cycles[cycle_key].add((uid, entry["link"]))
         
     now_kyiv = datetime.utcnow() + timedelta(hours=3)
     if now_kyiv.hour < 15:
